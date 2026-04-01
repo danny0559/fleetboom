@@ -446,13 +446,24 @@ class SciFiShip:
         self.v_ang = self.angle
         self.flame_ang = self.v_ang + math.pi
         self.slip = 0.0
+        self.prev_mx = None
+        self.prev_my = None
+        self.mouse_vx = 0.0
+        self.mouse_vy = 0.0
+        self.evade_timer = 0.0
+        self.evade_sign = random.choice([-1.0, 1.0])
+        self.evade_strength = 0.0
 
         self.exploding = False
         self.explode_t = 0.0
         self.explode_items = []
 
+        self.hull_shadow = canvas.create_polygon(0, 0, 0, 0, 0, 0,
+                                                 outline="#4E5968", fill="", width=1, joinstyle=tk.ROUND)
         self.hull = canvas.create_polygon(0, 0, 0, 0, 0, 0,
                                           outline=self.col, fill="", width=1, joinstyle=tk.ROUND)
+        self.hull_inner = canvas.create_polygon(0, 0, 0, 0, 0, 0,
+                                                outline="#C8D6EA", fill="", width=1, joinstyle=tk.ROUND)
 
         self.detail_lines = [
             canvas.create_line(0, 0, 0, 0, fill=self.col, width=1, capstyle=tk.ROUND),
@@ -461,10 +472,21 @@ class SciFiShip:
             canvas.create_line(0, 0, 0, 0, fill=self.col, width=1, capstyle=tk.ROUND),
             canvas.create_line(0, 0, 0, 0, fill=self.col, width=1, capstyle=tk.ROUND),
         ]
+        self.detail_glow = [
+            canvas.create_line(0, 0, 0, 0, fill="#C8D6EA", width=1, capstyle=tk.ROUND),
+            canvas.create_line(0, 0, 0, 0, fill="#C8D6EA", width=1, capstyle=tk.ROUND),
+            canvas.create_line(0, 0, 0, 0, fill="#C8D6EA", width=1, capstyle=tk.ROUND),
+        ]
 
         self.engine_center = canvas.create_oval(0, 0, 0, 0, outline=self.col, width=1, fill="")
         self.engine_left = canvas.create_oval(0, 0, 0, 0, outline=self.col, width=1, fill="")
         self.engine_right = canvas.create_oval(0, 0, 0, 0, outline=self.col, width=1, fill="")
+        self.engine_core_center = canvas.create_oval(0, 0, 0, 0, outline=self.flame_col, width=1, fill="")
+        self.engine_core_left = canvas.create_oval(0, 0, 0, 0, outline=self.flame_col, width=1, fill="")
+        self.engine_core_right = canvas.create_oval(0, 0, 0, 0, outline=self.flame_col, width=1, fill="")
+        self.nav_light_nose = canvas.create_oval(0, 0, 0, 0, outline="#EAF6FF", width=1, fill="")
+        self.nav_light_port = canvas.create_oval(0, 0, 0, 0, outline="#7FDBFF", width=1, fill="")
+        self.nav_light_starboard = canvas.create_oval(0, 0, 0, 0, outline="#FFD966", width=1, fill="")
 
         self.flame_c = [
             canvas.create_line(0, 0, 0, 0, fill=self.flame_col, width=1, smooth=True),
@@ -492,6 +514,9 @@ class SciFiShip:
             except Exception:
                 return 1.0
         return 1.0
+
+    def _move_margin(self):
+        return 160
 
     def set_difficulty(self, level: int):
         level = max(1, min(11, int(level)))
@@ -546,6 +571,16 @@ class SciFiShip:
             coords.extend([rx, ry])
         self.canvas.coords(item, *coords)
 
+    @staticmethod
+    def _scale_pts(pts, sx=1.0, sy=None):
+        if sy is None:
+            sy = sx
+        return [(px * sx, py * sy) for px, py in pts]
+
+    def _set_light(self, item, pt, r):
+        x, y = self._rot_ship(pt[0], pt[1])
+        self.canvas.coords(item, x - r, y - r, x + r, y + r)
+
     def _draw_rotated_ellipse_outline(self, item, cx, cy, a, b, ang, segments=14):
         pts = []
         ca, sa = math.cos(ang), math.sin(ang)
@@ -564,10 +599,101 @@ class SciFiShip:
         self.vx *= decay
         self.vy *= decay
 
+    def _update_mouse_motion(self, mx, my, dt):
+        if self.prev_mx is None or self.prev_my is None:
+            self.prev_mx = mx
+            self.prev_my = my
+            self.mouse_vx = 0.0
+            self.mouse_vy = 0.0
+            return
+
+        raw_vx = (mx - self.prev_mx) / max(dt, 1e-4)
+        raw_vy = (my - self.prev_my) / max(dt, 1e-4)
+        self.prev_mx = mx
+        self.prev_my = my
+
+        follow = 0.34
+        self.mouse_vx += (raw_vx - self.mouse_vx) * follow
+        self.mouse_vy += (raw_vy - self.mouse_vy) * follow
+
+    def _set_flee_target(self, mx, my, threat_scale=0.0, force_evade=False):
+        away_x = self.x - mx
+        away_y = self.y - my
+        away_d = math.hypot(away_x, away_y)
+        if away_d < 1e-6:
+            away_x = math.cos(self.angle + math.pi)
+            away_y = math.sin(self.angle + math.pi)
+            away_d = 1.0
+        away_x /= away_d
+        away_y /= away_d
+
+        side_x = -away_y
+        side_y = away_x
+
+        if self.evade_timer > 0.0:
+            lateral = self.evade_sign * self.evade_strength
+        else:
+            lateral = 0.0
+
+        if abs(away_x) < 0.18:
+            lateral += random.choice([-1.0, 1.0]) * 0.55
+
+        if force_evade:
+            self.evade_sign = random.choice([-1.0, 1.0])
+            self.evade_strength = random.uniform(0.75, 1.10)
+            self.evade_timer = random.uniform(0.18, 0.34)
+            lateral = self.evade_sign * self.evade_strength
+
+        lateral += random.uniform(-0.10, 0.10)
+        lateral = max(-1.25, min(1.25, lateral))
+
+        margin = self._move_margin()
+        edge_band = 120.0
+        push_x = 0.0
+        push_y = 0.0
+        if self.x < margin + edge_band:
+            push_x += (margin + edge_band - self.x) / edge_band
+        elif self.x > self.w - margin - edge_band:
+            push_x -= (self.x - (self.w - margin - edge_band)) / edge_band
+        if self.y < margin + edge_band:
+            push_y += (margin + edge_band - self.y) / edge_band
+        elif self.y > self.h - margin - edge_band:
+            push_y -= (self.y - (self.h - margin - edge_band)) / edge_band
+
+        edge_pressure = max(abs(push_x), abs(push_y))
+        reach = self.escape_dist * (1.0 + 0.30 * max(0.0, threat_scale) + 0.18 * edge_pressure)
+        dir_x = away_x + side_x * lateral + push_x * (0.90 + 0.35 * edge_pressure)
+        dir_y = away_y + side_y * lateral + push_y * (0.90 + 0.35 * edge_pressure)
+        dir_d = math.hypot(dir_x, dir_y)
+        if dir_d < 1e-6:
+            dir_x, dir_y = away_x, away_y
+            dir_d = 1.0
+        dir_x /= dir_d
+        dir_y /= dir_d
+
+        self.tx = self.x + dir_x * reach
+        self.ty = self.y + dir_y * reach
+
+        self.tx = max(margin, min(self.w - margin, self.tx))
+        self.ty = max(margin, min(self.h - margin, self.ty))
+        if math.hypot(self.tx - self.x, self.ty - self.y) < 28.0:
+            fallback = max(90.0, self.escape_dist * 0.70)
+            self.tx = self.x + push_x * fallback
+            self.ty = self.y + push_y * fallback
+            if abs(push_x) < 1e-6 and abs(push_y) < 1e-6:
+                self.tx = self.x + side_x * self.evade_sign * fallback
+                self.ty = self.y + side_y * self.evade_sign * fallback
+            self.tx = max(margin, min(self.w - margin, self.tx))
+            self.ty = max(margin, min(self.h - margin, self.ty))
+        self.state = "FLEE"
+
     def _apply_style_visibility(self):
         self.canvas.itemconfig(self.engine_center, state=("hidden" if self.is_twin else "normal"))
         self.canvas.itemconfig(self.engine_left, state=("normal" if self.is_twin else "hidden"))
         self.canvas.itemconfig(self.engine_right, state=("normal" if self.is_twin else "hidden"))
+        self.canvas.itemconfig(self.engine_core_center, state=("hidden" if self.is_twin else "normal"))
+        self.canvas.itemconfig(self.engine_core_left, state=("normal" if self.is_twin else "hidden"))
+        self.canvas.itemconfig(self.engine_core_right, state=("normal" if self.is_twin else "hidden"))
 
         for it in self.flame_c:
             self.canvas.itemconfig(it, state=("hidden" if self.is_twin else "normal"))
@@ -575,6 +701,8 @@ class SciFiShip:
             self.canvas.itemconfig(it, state=("normal" if self.is_twin else "hidden"))
         for it in self.flame_r:
             self.canvas.itemconfig(it, state=("normal" if self.is_twin else "hidden"))
+        for it in self.detail_glow:
+            self.canvas.itemconfig(it, state="normal")
 
     def _shape_for_style(self, L, W):
         s = self.style
@@ -739,8 +867,10 @@ class SciFiShip:
         return hull, lines, mode, {"center": eng_center, "left": eng_left, "right": eng_right}
 
     def _all_items(self):
-        return [self.hull] + self.detail_lines + [
-            self.engine_center, self.engine_left, self.engine_right
+        return [self.hull_shadow, self.hull, self.hull_inner] + self.detail_lines + self.detail_glow + [
+            self.engine_center, self.engine_left, self.engine_right,
+            self.engine_core_center, self.engine_core_left, self.engine_core_right,
+            self.nav_light_nose, self.nav_light_port, self.nav_light_starboard
         ] + self.flame_c + self.flame_l + self.flame_r
 
     def destroy(self):
@@ -889,7 +1019,7 @@ class SciFiShip:
         r = 260
         self.tx = self.x + random.randint(-r, r)
         self.ty = self.y + random.randint(-r, r)
-        margin = 160
+        margin = self._move_margin()
         self.tx = max(margin, min(self.w - margin, self.tx))
         self.ty = max(margin, min(self.h - margin, self.ty))
         self.state = "WANDER"
@@ -902,25 +1032,41 @@ class SciFiShip:
         if self.exploding:
             return self._update_explosion(dt)
 
+        self._update_mouse_motion(mx, my, dt)
+        if self.evade_timer > 0.0:
+            self.evade_timer = max(0.0, self.evade_timer - dt)
+
         # 捕获半径随飞船缩放，让大船更容易“贴住”
         catch_r = self.catch_radius * (0.9 + 0.35 * self._ship_scale())
         d_mouse = math.hypot(mx - self.x, my - self.y)
         if d_mouse < catch_r:
             self._catch_accum += dt
             if self._catch_accum >= self.catch_hold:
-                self.explode()
-                return True
+                if self.enable_explosions:
+                    self.explode()
+                    return True
+                self._catch_accum = self.catch_hold * 0.35
+                self.evade_timer = max(self.evade_timer, 0.26)
+                self.evade_sign = random.choice([-1.0, 1.0])
+                self.evade_strength = max(self.evade_strength, 1.0)
         else:
             self._catch_accum = max(0.0, self._catch_accum - dt * 0.8)
 
-        if d_mouse < self.flee_trigger:
-            self.state = "FLEE"
-            ang = math.atan2(self.y - my, self.x - mx)
-            self.tx = self.x + math.cos(ang) * self.escape_dist
-            self.ty = self.y + math.sin(ang) * self.escape_dist
-            margin = 160
-            self.tx = max(margin, min(self.w - margin, self.tx))
-            self.ty = max(margin, min(self.h - margin, self.ty))
+        to_ship_x = self.x - mx
+        to_ship_y = self.y - my
+        to_ship_d = max(1e-6, math.hypot(to_ship_x, to_ship_y))
+        approach_speed = (self.mouse_vx * to_ship_x + self.mouse_vy * to_ship_y) / to_ship_d
+        incoming = approach_speed > 120.0
+        pressure_dist = self.flee_trigger * (1.65 if incoming else 1.0)
+        threat_scale = max(0.0, min(1.8, approach_speed / 520.0))
+        should_force_evade = (
+            incoming
+            and d_mouse < self.flee_trigger * 1.45
+            and self.evade_timer <= 0.0
+        )
+
+        if d_mouse < pressure_dist:
+            self._set_flee_target(mx, my, threat_scale=threat_scale, force_evade=should_force_evade)
 
         if self.state == "IDLE":
             self.idle_timer -= 1
@@ -982,28 +1128,36 @@ class SciFiShip:
                 self.x += self.vx * dt
                 self.y += self.vy * dt
 
-                margin = 160
+                margin = self._move_margin()
                 self.x = max(margin, min(self.w - margin, self.x))
                 self.y = max(margin, min(self.h - margin, self.y))
 
         speed = math.hypot(self.vx, self.vy)
         if speed > 1e-3:
             raw_v_ang = math.atan2(self.vy, self.vx)
-            self.v_ang = self._lerp_angle(self.v_ang, raw_v_ang, 0.10)
+            v_follow = 0.20 if speed > 140.0 else 0.14
+            self.v_ang = self._lerp_angle(self.v_ang, raw_v_ang, v_follow)
 
         prev = getattr(self, "_prev_v_ang", self.v_ang)
         ang_vel = self._angle_diff(prev, self.v_ang) / dt
         self._prev_v_ang = self.v_ang
 
-        slip_target = max(-0.26, min(0.26, ang_vel * 0.08))
+        slip_target = max(-0.18, min(0.18, ang_vel * 0.05))
         if speed < 80.0:
             slip_target *= (speed / 80.0)
-        self.slip += (slip_target - self.slip) * 0.06
+        slip_follow = 0.18 if speed > 80.0 else 0.12
+        self.slip += (slip_target - self.slip) * slip_follow
 
         tail_ang = self.angle + math.pi
-        target_flame_ang = (self.v_ang + math.pi + self.slip) if speed > 60.0 else tail_ang
+        move_tail_ang = self.v_ang + math.pi
+        move_diff = self._angle_diff(tail_ang, move_tail_ang)
+        speed_blend = max(0.0, min(1.0, (speed - 35.0) / 170.0))
+        max_offset = math.radians(13.0)
+        vel_offset = max(-max_offset, min(max_offset, move_diff)) * speed_blend
+        slip_offset = self.slip * (0.30 + 0.25 * speed_blend)
+        target_flame_ang = tail_ang + vel_offset + slip_offset
 
-        max_turn_rate = math.radians(85 if speed > 120.0 else 52)
+        max_turn_rate = math.radians(150 if speed > 150.0 else 110)
         diff = self._angle_diff(self.flame_ang, target_flame_ang)
         max_step = max_turn_rate * dt
         diff = max(-max_step, min(max_step, diff))
@@ -1021,7 +1175,23 @@ class SciFiShip:
         W = 6.5 * sc
 
         hull, lines, mode, eng = self._shape_for_style(L, W)
+        hull_shadow = [(px - 1.4 * sc, py + 0.9 * sc) for px, py in hull]
+        hull_inner = self._scale_pts(hull, 0.78, 0.72)
+        self._set_poly(self.hull_shadow, hull_shadow)
         self._set_poly(self.hull, hull)
+        self._set_poly(self.hull_inner, hull_inner)
+
+        nose_pt = max(hull, key=lambda p: p[0])
+        side_candidates = [p for p in hull if p[0] < nose_pt[0] - 0.12 * L]
+        if not side_candidates:
+            side_candidates = hull
+        port_pt = min(side_candidates, key=lambda p: p[1])
+        starboard_pt = max(side_candidates, key=lambda p: p[1])
+        light_r = 0.85 * sc * (0.92 + 0.16 * math.sin(self.phase * 2.7 + 0.6))
+        wing_r = 0.72 * sc * (0.88 + 0.22 * math.sin(self.phase * 2.1 + 1.3))
+        self._set_light(self.nav_light_nose, (nose_pt[0] - 0.08 * L, nose_pt[1]), light_r)
+        self._set_light(self.nav_light_port, (port_pt[0] * 0.96, port_pt[1] * 0.96), wing_r)
+        self._set_light(self.nav_light_starboard, (starboard_pt[0] * 0.96, starboard_pt[1] * 0.96), wing_r)
 
         for i, item in enumerate(self.detail_lines):
             if i < len(lines):
@@ -1029,19 +1199,32 @@ class SciFiShip:
                 self._set_line(item, lines[i])
             else:
                 self.canvas.itemconfig(item, state="hidden")
+        glow_lines = [self._scale_pts(line, 0.72, 0.72) for line in lines[:len(self.detail_glow)]]
+        for i, item in enumerate(self.detail_glow):
+            if i < len(glow_lines):
+                self.canvas.itemconfig(item, state="normal")
+                self._set_line(item, glow_lines[i])
+            else:
+                self.canvas.itemconfig(item, state="hidden")
 
         pulse = 1.0 + 0.20 * math.sin(self.phase * 2.2)
         eng_r = (2.0 * sc) * pulse
+        core_r = eng_r * (0.46 + 0.10 * math.sin(self.phase * 3.4 + 0.4))
 
         if mode == "twin":
             self.canvas.itemconfig(self.engine_center, state="hidden")
             self.canvas.itemconfig(self.engine_left, state="normal")
             self.canvas.itemconfig(self.engine_right, state="normal")
+            self.canvas.itemconfig(self.engine_core_center, state="hidden")
+            self.canvas.itemconfig(self.engine_core_left, state="normal")
+            self.canvas.itemconfig(self.engine_core_right, state="normal")
 
             elx, ely = self._rot_ship(eng["left"][0], eng["left"][1])
             erx, ery = self._rot_ship(eng["right"][0], eng["right"][1])
             self.canvas.coords(self.engine_left, elx - eng_r, ely - eng_r, elx + eng_r, ely + eng_r)
             self.canvas.coords(self.engine_right, erx - eng_r, ery - eng_r, erx + eng_r, ery + eng_r)
+            self.canvas.coords(self.engine_core_left, elx - core_r, ely - core_r, elx + core_r, ely + core_r)
+            self.canvas.coords(self.engine_core_right, erx - core_r, ery - core_r, erx + core_r, ery + core_r)
 
             self._draw_thrust_trails(elx, ely, current_speed, which="L", scale=sc)
             self._draw_thrust_trails(erx, ery, current_speed, which="R", scale=sc)
@@ -1052,9 +1235,13 @@ class SciFiShip:
             self.canvas.itemconfig(self.engine_center, state="normal")
             self.canvas.itemconfig(self.engine_left, state="hidden")
             self.canvas.itemconfig(self.engine_right, state="hidden")
+            self.canvas.itemconfig(self.engine_core_center, state="normal")
+            self.canvas.itemconfig(self.engine_core_left, state="hidden")
+            self.canvas.itemconfig(self.engine_core_right, state="hidden")
 
             ecx, ecy = self._rot_ship(eng["center"][0], eng["center"][1])
             self.canvas.coords(self.engine_center, ecx - eng_r, ecy - eng_r, ecx + eng_r, ecy + eng_r)
+            self.canvas.coords(self.engine_core_center, ecx - core_r, ecy - core_r, ecx + core_r, ecy + core_r)
 
             self._draw_thrust_trails(ecx, ecy, current_speed, which="C", scale=sc)
 
@@ -1064,15 +1251,17 @@ class SciFiShip:
     def _draw_thrust_trails(self, ecx, ecy, current_speed, which="C", scale=1.0):
         norm = min(1.0, current_speed / 650.0)
         norm = norm * norm
+        stretch = 0.78 + norm * 0.95
+        thin = max(0.58, 0.96 - norm * 0.34)
 
-        a1 = (1.6 + norm * 16.0) * (1.0 + 0.10 * math.sin(self.phase * 4.0))
-        b1 = 0.7 + norm * 1.0
+        a1 = (1.7 + norm * 16.0) * stretch * (1.0 + 0.10 * math.sin(self.phase * 4.0))
+        b1 = (0.95 + norm * 0.55) * thin
 
-        a2 = (2.2 + norm * 22.0) * (1.0 + 0.08 * math.sin(self.phase * 3.2 + 1.0))
-        b2 = 0.6 + norm * 0.8
+        a2 = (2.6 + norm * 23.0) * stretch * (1.0 + 0.08 * math.sin(self.phase * 3.2 + 1.0))
+        b2 = (0.82 + norm * 0.45) * thin
 
-        a3 = (2.8 + norm * 28.0) * (1.0 + 0.06 * math.sin(self.phase * 2.6 + 2.2))
-        b3 = 0.55 + norm * 0.7
+        a3 = (3.4 + norm * 31.0) * stretch * (1.0 + 0.06 * math.sin(self.phase * 2.6 + 2.2))
+        b3 = (0.72 + norm * 0.38) * thin
 
         # ✅ 尾焰也随飞船缩放
         a1 *= scale
@@ -1082,7 +1271,7 @@ class SciFiShip:
         a3 *= scale
         b3 *= scale
 
-        offset_scale = min(1.0, current_speed / 220.0)
+        offset_scale = 0.40 + 0.75 * min(1.0, current_speed / 220.0)
 
         def center_for(a, extra):
             off = (a * 0.60 + extra * scale) * offset_scale
@@ -1815,7 +2004,7 @@ class TransparentOverlay:
         except Exception:
             pass
 
-        self.win.after(33, self.animate)
+        self.win.after(8, self.animate)
 
 
 # -----------------------
