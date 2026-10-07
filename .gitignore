@@ -1,2 +1,24 @@
 __pycache__/
 *.pyc
+
+# Environments, local IDE configuration and build outputs
+.venv/
+venv/
+.idea/
+.vscode/
+build/
+dist/
+*.exe
+*.spec
+*.log
+.env
+.env.*
+
+# Local animation experiments and migration records outside FleetBoom
+/bunny.py
+/horse.py
+/spaceship.py
+/spaceship[1-9].py
+/spaceship1[0-3].py
+/打包命令.txt
+/迁移清单.json
